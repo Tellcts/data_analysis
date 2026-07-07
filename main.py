@@ -526,6 +526,12 @@ def plot_batch_yield(batch_stats: pd.DataFrame) -> Path:
     ax.set_ylim(70, 102)
     ax.legend(fontsize=9)
     ax.grid(axis="y", alpha=0.3)
+    ax.tick_params(axis="x", labelsize=8, rotation=45)
+    # 批次过多时隔位显示标签
+    if len(batches) > 15:
+        for i, label in enumerate(ax.get_xticklabels()):
+            if i % 2 == 1:
+                label.set_visible(False)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

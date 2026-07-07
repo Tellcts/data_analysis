@@ -323,6 +323,11 @@ with tab2:
         ax.set_ylim(50, 102)
         ax.legend(fontsize=8)
         ax.grid(axis="y", alpha=0.3)
+        ax.tick_params(axis="x", labelsize=8, rotation=45)
+        if len(batches) > 15:
+            for i, label in enumerate(ax.get_xticklabels()):
+                if i % 2 == 1:
+                    label.set_visible(False)
         fig.tight_layout()
         st.pyplot(fig)
 
@@ -434,6 +439,12 @@ with tab4:
             ax.set_xlabel("批次")
             ax.set_ylabel("不良数")
             ax.grid(axis="y", alpha=0.3)
+            ax.tick_params(axis="x", labelsize=8, rotation=45)
+            batches_list = ng_by_batch["batch"].tolist()
+            if len(batches_list) > 15:
+                for i, label in enumerate(ax.get_xticklabels()):
+                    if i % 2 == 1:
+                        label.set_visible(False)
             fig.tight_layout()
             st.pyplot(fig)
         else:
