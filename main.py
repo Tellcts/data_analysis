@@ -16,9 +16,24 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import matplotlib
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from reportlab.lib import colors as rl_colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Image,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 from tabulate import tabulate
 
 matplotlib.rcParams["font.sans-serif"] = [
@@ -38,6 +53,7 @@ CHART_DIR = OUTPUT_DIR / "charts"
 SPC_CHART_DIR = OUTPUT_DIR / "spc_charts"
 REPORT_PATH = OUTPUT_DIR / "report.csv"
 SPC_REPORT_PATH = OUTPUT_DIR / "spc_report.csv"
+PDF_REPORT_PATH = OUTPUT_DIR / "analysis_report.pdf"
 
 # 光器件测试指标阈值
 SPEC = {
@@ -718,6 +734,145 @@ def plot_cpk_summary(metrics: list[dict]) -> Path:
 
 
 # ============================================================
+# PDF 报告生成
+# ============================================================
+
+def _register_cjk_font() -> str:
+    """注册中文字体到 reportlab，返回字体名称"""
+    font_name = "CJK"
+    if font_name in pdfmetrics._fonts:
+        return font_name
+
+    # 尝试多个字体源
+    candidates: list[tuple[str, str]] = []
+    # 1. 从 matplotlib 字体管理器查找
+    for family in ["Microsoft YaHei", "SimHei", "SimSun"]:
+        for f in fm.fontManager.ttflist:
+            if family in f.name and f.fname.endswith((".ttf", ".ttc")):
+                candidates.append((f.name, f.fname))
+                break
+    # 2. Windows 系统字体兜底
+    system_fonts = [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+    ]
+    for path in system_fonts:
+        if Path(path).exists():
+            candidates.append(("SystemCJK", path))
+            break
+
+    if candidates:
+        name, path = candidates[0]
+        pdfmetrics.registerFont(TTFont(font_name, path, subfontIndex=0))
+        return font_name
+    return "Helvetica"
+
+
+def generate_pdf_report(
+    batch_stats: pd.DataFrame,
+    day_stats: pd.DataFrame,
+    defect_stats: pd.DataFrame,
+    spc_metrics: list[dict],
+    ok_count: int,
+    ng_count: int,
+    total: int,
+):
+    """生成正式 PDF 品质分析报告"""
+    font = _register_cjk_font()
+
+    title_style = ParagraphStyle("Title", fontName=font, fontSize=18,
+                                 leading=26, spaceAfter=16, alignment=1)
+    h2_style = ParagraphStyle("H2", fontName=font, fontSize=14,
+                              leading=20, spaceBefore=14, spaceAfter=8)
+    h3_style = ParagraphStyle("H3", fontName=font, fontSize=11,
+                              leading=16, spaceBefore=8, spaceAfter=4)
+    body_style = ParagraphStyle("Body", fontName=font, fontSize=9,
+                                leading=14, spaceAfter=4)
+
+    doc = SimpleDocTemplate(str(PDF_REPORT_PATH), pagesize=A4,
+                            leftMargin=2*cm, rightMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+    story: list = []
+
+    # ── 封面 ──
+    story.append(Spacer(1, 2*cm))
+    story.append(Paragraph("光器件产线品质分析报告", title_style))
+    story.append(Paragraph(datetime.now().strftime("%Y-%m-%d"), body_style))
+    story.append(Spacer(1, 1*cm))
+
+    # KPI
+    yield_pct = ok_count / total * 100 if total else 0
+    story.append(Paragraph(f"总测试数：{total}　｜　合格：{ok_count}　｜　不合格：{ng_count}　｜　良率：{yield_pct:.1f}%", h2_style))
+    story.append(Spacer(1, 0.5*cm))
+
+    # ── SPC 汇总表 ──
+    story.append(Paragraph("SPC 过程能力分析", h3_style))
+    spc_rows = [["指标", "子组数", "Cpk", "Cpk评级", "异常点数", "X-UCL", "X-LCL"]]
+    for mt in spc_metrics:
+        b = mt["bounds"]
+        cpk = mt["cpk"] or 0
+        grade = "A" if cpk >= 1.33 else "B" if cpk >= 1.0 else "C"
+        spc_rows.append([
+            mt["column"], str(mt["n_groups"]), f"{cpk:.2f}", grade,
+            str(mt["n_flagged"]), f"{b['x_ucl']:.3f}", f"{b['x_lcl']:.3f}",
+        ])
+    tbl = Table(spc_rows, hAlign="LEFT")
+    tbl.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), font),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.5, rl_colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#2C3E50")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#F2F6FA")]),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 0.6*cm))
+
+    # ── 批次良率 ──
+    story.append(Paragraph("批次良率统计", h3_style))
+    batch_rows = [["批次", "总件数", "合格数", "良率"]]
+    for idx, row in batch_stats.iterrows():
+        batch_rows.append([idx, str(int(row["总件数"])), str(int(row["合格数"])), f"{row['良率']:.1f}%"])
+    btbl = Table(batch_rows, hAlign="LEFT")
+    btbl.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), font),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.5, rl_colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#2C3E50")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#F2F6FA")]),
+    ]))
+    story.append(btbl)
+
+    # ── 嵌入图表 ──
+    chart_pairs: list[list[str]] = [
+        ["良率日趋势", "yield_trend.png"],
+        ["批次良率对比", "batch_yield.png"],
+    ]
+    if not defect_stats.empty:
+        chart_pairs.append(["不良原因分布", "defect_pie.png"])
+    chart_pairs.append(["Cpk 汇总", "spc_charts/cpk_summary.png"])
+    for mt in spc_metrics:
+        safe_name = mt["column"].replace("_", "-")
+        chart_pairs.append([f"SPC {mt['column']}", f"spc_charts/spc_{safe_name}.png"])
+
+    for i, (title, filename) in enumerate(chart_pairs):
+        img_path = OUTPUT_DIR / filename
+        if not img_path.exists():
+            continue
+        # 每页最多放 2 张图
+        if i % 2 == 0:
+            story.append(Spacer(1, 0.4*cm))
+        story.append(Paragraph(title, h3_style))
+        img = Image(str(img_path), width=16*cm, height=7.2*cm)
+        story.append(img)
+
+    doc.build(story)
+    return PDF_REPORT_PATH
+
+
+# ============================================================
 # CSV 导入导出
 # ============================================================
 
@@ -810,15 +965,20 @@ def run_pipeline(num_records: int = 2000):
     print("\n[8/8] 导出分析报告...")
     export_to_csv(batch_stats, REPORT_PATH)
     export_spc_report(spc_metrics, SPC_REPORT_PATH)
-    print(f"  SPC报告已导出: {SPC_REPORT_PATH}")
+    pdf_path = generate_pdf_report(
+        batch_stats, day_stats, defect_stats, spc_metrics,
+        ok_count, ng_count, num_records,
+    )
+    print(f"  PDF报告已导出: {pdf_path}")
 
     print("\n" + "=" * 60)
     print("  分析完成！输出文件：")
     print(f"    数据库:    {DB_PATH}")
     print(f"    基础图表:  {CHART_DIR}")
     print(f"    SPC 图表:  {SPC_CHART_DIR}")
-    print(f"    报告:      {REPORT_PATH}")
+    print(f"    CSV 报告:  {REPORT_PATH}")
     print(f"    SPC 报告:  {SPC_REPORT_PATH}")
+    print(f"    PDF 报告:  {pdf_path}")
     print("=" * 60)
 
 
